@@ -5,7 +5,6 @@
 [![.NET](https://img.shields.io/badge/.NET-9.0-512BD4?style=flat-square&logo=dotnet)](https://dotnet.microsoft.com/)
 [![Blazor](https://img.shields.io/badge/Blazor-WebAssembly-512BD4?style=flat-square&logo=blazor)](https://blazor.net/)
 [![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite)](https://sqlite.org/)
-[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 A sophisticated client-server application that transforms natural language queries into SQL using local AI models. Built with .NET 9, Blazor WebAssembly, and integrated with Ollama for privacy-focused AI processing.
 
@@ -245,23 +244,11 @@ FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS base
 # ... Docker configuration
 ```
 
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
 ### Development Guidelines
 - Follow C# coding standards
 - Add unit tests for new features
 - Update documentation
 - Ensure security best practices
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
 ## 🙏 Acknowledgments
 
@@ -273,5 +260,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Built with ❤️ using .NET 9 and Blazor WebAssembly**
-
-> 🚀 **Ready for MVP and Production Deployment**
