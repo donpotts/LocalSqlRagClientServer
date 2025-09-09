@@ -1,0 +1,848 @@
+@page "/"
+@using LocalTextToSqlChat.Client.Models
+@using LocalTextToSqlChat.Client.Services
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.AspNetCore.Authorization
+@using Microsoft.AspNetCore.Components
+@inject ChatService ChatService
+@inject AuthService AuthService
+@inject NavigationManager Navigation
+@inject AuthenticationStateProvider AuthStateProvider
+@inject IJSRuntime JSRuntime
+@attribute [Authorize]
+
+<PageTitle>Text-to-SQL Chat</PageTitle>
+
+<div class="chat-container">
+    <div class="chat-header">
+        <h1>Text-to-SQL Chat Assistant</h1>
+        <div class="user-info">
+            <AuthorizeView>
+                <Authorized>
+                    <span>Welcome, @context.User.Identity!.Name!</span>
+                    @if (isCurrentUserAdmin)
+                    {
+                        <button class="btn btn-admin" @onclick="NavigateToAdmin">
+                            <i class="bi bi-shield-check"></i> Admin Panel
+                        </button>
+                    }
+                    <button class="btn btn-home" @onclick="HandleReset">
+                        <i class="bi bi-house-fill"></i> Reset
+                    </button>
+                    <button class="btn btn-logout" @onclick="HandleLogout">Logout</button>
+                </Authorized>
+                <NotAuthorized>
+                    <button class="btn btn-login" @onclick="NavigateToLogin">Login</button>
+                </NotAuthorized>
+            </AuthorizeView>
+        </div>
+    </div>
+
+    <div class="chat-messages" @ref="chatMessagesRef">
+        @if (chatMessages.Count == 0)
+        {
+            <div class="welcome-message">
+                <h3>Welcome to Text-to-SQL Chat!</h3>
+                <p>Ask questions about your database and I'll help you find the answers.</p>
+                @if (!isCurrentUserAdmin)
+                {
+                    <div class="query-restriction-notice">
+                        <i class="bi bi-info-circle"></i>
+                        <strong>Note:</strong> You have read-only access. Only SELECT queries are allowed for data retrieval.
+                    </div>
+                }
+            </div>
+        }
+
+        <!-- Always visible hot buttons -->
+        <div class="hot-buttons-container">
+            <div class="hot-buttons-header">
+                <h4>Sample Queries</h4>
+            </div>
+            <div class="example-prompts">
+                <div class="example-row">
+                    <button class="example-prompt" @onclick="@(() => TryExample("Show me all employees"))">
+                        <i class="bi bi-people"></i> Show me all employees
+                    </button>
+                    <button class="example-prompt" @onclick="@(() => TryExample("List employees by department"))">
+                        <i class="bi bi-building"></i> List employees by department
+                    </button>
+                </div>
+                <div class="example-row">
+                    <button class="example-prompt" @onclick="@(() => TryExample("What's the average salary in Engineering?"))">
+                        <i class="bi bi-calculator"></i> Average salary in Engineering
+                    </button>
+                    <button class="example-prompt" @onclick="@(() => TryExample("Who are the highest paid employees?"))">
+                        <i class="bi bi-trophy"></i> Highest paid employees
+                    </button>
+                </div>
+                <div class="example-row">
+                    <button class="example-prompt" @onclick="@(() => TryExample("How many employees in each department?"))">
+                        <i class="bi bi-bar-chart"></i> Employee count by department
+                    </button>
+                    <button class="example-prompt" @onclick="@(() => TryExample("Who was hired most recently?"))">
+                        <i class="bi bi-calendar-plus"></i> Most recent hires
+                    </button>
+                </div>
+                <div class="example-row">
+                    <button class="example-prompt" @onclick="@(() => TryExample("Show employees hired in 2022"))">
+                        <i class="bi bi-calendar-event"></i> Employees hired in 2022
+                    </button>
+                    <button class="example-prompt" @onclick="@(() => TryExample("What's the salary range across all employees?"))">
+                        <i class="bi bi-graph-up"></i> Salary range analysis
+                    </button>
+                </div>
+            </div>
+        </div>
+        
+        @foreach (var message in chatMessages)
+        {
+            <div class="message @(message.IsFromUser ? "user-message" : "assistant-message")">
+                @if (message.IsFromUser)
+                {
+                    <div class="message-content">
+                        <div class="message-text">@message.Message</div>
+                    </div>
+                }
+                else
+                {
+                    <div class="message-content">
+                        @if (!string.IsNullOrEmpty(message.SqlQuery))
+                        {
+                            <div class="sql-query">
+                                <strong>Generated SQL:</strong>
+                                <code>@message.SqlQuery</code>
+                            </div>
+                        }
+                        <div class="message-text">@((MarkupString)FormatResponse(message.Response))</div>
+                        <div class="message-time">@FormatProcessingTime(message.ProcessingTimeMs)</div>
+                    </div>
+                }
+            </div>
+        }
+        
+        @if (isLoading)
+        {
+            <div class="message assistant-message">
+                <div class="message-content">
+                    <div class="typing-indicator">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                    </div>
+                    <div class="message-text">Thinking...</div>
+                </div>
+            </div>
+        }
+    </div>
+
+    <div class="chat-input-container">
+        <EditForm Model="@chatRequest" OnValidSubmit="@SendMessage" class="chat-input-form">
+            <div class="input-group">
+                <InputText @bind-Value="chatRequest.Message" 
+                          placeholder="Ask a question about your database..." 
+                          class="form-control"
+                          disabled="@isLoading"
+                          @onkeypress="@HandleKeyPress" />
+                <button type="submit" class="btn btn-send" disabled="@(isLoading || string.IsNullOrWhiteSpace(chatRequest.Message))">
+                    <span>Send</span>
+                </button>
+            </div>
+        </EditForm>
+    </div>
+</div>
+
+@code {
+    private ChatRequest chatRequest = new();
+    private List<ChatMessage> chatMessages = new();
+    private bool isLoading = false;
+    private bool isCurrentUserAdmin = false;
+    private ElementReference chatMessagesRef;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var authState = await AuthStateProvider.GetAuthenticationStateAsync();
+        if (!authState.User.Identity!.IsAuthenticated)
+        {
+            Navigation.NavigateTo("/login");
+        }
+        else
+        {
+            isCurrentUserAdmin = await AuthService.IsAdminAsync();
+        }
+    }
+
+    private async Task SendMessage()
+    {
+        if (string.IsNullOrWhiteSpace(chatRequest.Message) || isLoading)
+            return;
+
+        var userMessage = new ChatMessage
+        {
+            Message = chatRequest.Message,
+            IsFromUser = true,
+            CreatedAt = DateTime.Now
+        };
+
+        chatMessages.Add(userMessage);
+        var currentMessage = chatRequest.Message;
+        chatRequest.Message = string.Empty;
+        isLoading = true;
+
+        StateHasChanged();
+        await ScrollToBottom();
+
+        try
+        {
+            var response = await ChatService.SendMessageAsync(currentMessage);
+            if (response != null)
+            {
+                var assistantMessage = new ChatMessage
+                {
+                    Message = currentMessage,
+                    Response = response.Response,
+                    SqlQuery = response.SqlQuery,
+                    IsFromUser = false,
+                    CreatedAt = response.CreatedAt,
+                    ProcessingTimeMs = response.ProcessingTimeMs
+                };
+
+                chatMessages.Add(assistantMessage);
+            }
+            else
+            {
+                var errorMessage = new ChatMessage
+                {
+                    Message = currentMessage,
+                    Response = "Sorry, I couldn't process your request. Please try again.",
+                    IsFromUser = false,
+                    CreatedAt = DateTime.Now
+                };
+
+                chatMessages.Add(errorMessage);
+            }
+        }
+        catch (Exception ex)
+        {
+            var errorMessage = new ChatMessage
+            {
+                Message = currentMessage,
+                Response = $"An error occurred: {ex.Message}",
+                IsFromUser = false,
+                CreatedAt = DateTime.Now
+            };
+
+            chatMessages.Add(errorMessage);
+        }
+        finally
+        {
+            isLoading = false;
+            StateHasChanged();
+            await ScrollToBottom();
+        }
+    }
+
+    private async Task HandleKeyPress(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !e.ShiftKey)
+        {
+            await SendMessage();
+        }
+    }
+
+    private async Task HandleLogout()
+    {
+        await AuthService.LogoutAsync();
+        ((CustomAuthenticationStateProvider)AuthStateProvider).NotifyUserLogout();
+        Navigation.NavigateTo("/login");
+    }
+
+    private void NavigateToLogin()
+    {
+        Navigation.NavigateTo("/login");
+    }
+
+    private void NavigateToAdmin()
+    {
+        Navigation.NavigateTo("/admin");
+    }
+    
+    private void HandleReset()
+    {
+        chatMessages.Clear();
+        chatRequest.Message = string.Empty;
+        isLoading = false;
+        StateHasChanged();
+    }
+
+    private async Task ScrollToBottom()
+    {
+        await Task.Delay(50); // Small delay to ensure DOM is updated
+        try
+        {
+            await JSRuntime.InvokeVoidAsync("scrollToBottom", chatMessagesRef);
+        }
+        catch
+        {
+            // Fallback if JS fails
+            await Task.Delay(100);
+            StateHasChanged();
+        }
+    }
+    
+    private string FormatResponse(string response)
+    {
+        if (string.IsNullOrEmpty(response))
+            return response;
+            
+        // Check if the response contains a markdown table
+        if (response.Contains("|") && response.Contains("-|"))
+        {
+            return ConvertMarkdownTableToHtml(response);
+        }
+        
+        // For non-table responses, escape HTML and preserve line breaks
+        return System.Web.HttpUtility.HtmlEncode(response).Replace("\n", "<br>");
+    }
+    
+    private string ConvertMarkdownTableToHtml(string response)
+    {
+        var lines = response.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var result = new System.Text.StringBuilder();
+        bool inTable = false;
+        bool isFirstTableRow = true;
+        
+        foreach (var line in lines)
+        {
+            var trimmedLine = line.Trim();
+            
+            // Check if this line is a table row
+            if (trimmedLine.StartsWith("|") && trimmedLine.EndsWith("|"))
+            {
+                if (!inTable)
+                {
+                    // Start of table
+                    result.Append("<div class='table-container'><table class='result-table'>");
+                    inTable = true;
+                    isFirstTableRow = true;
+                }
+                
+                // Skip separator rows (contain only |, -, and spaces)
+                if (trimmedLine.Contains("---") || trimmedLine.All(c => c == '|' || c == '-' || char.IsWhiteSpace(c)))
+                {
+                    continue;
+                }
+                
+                // Process table row
+                var cells = trimmedLine.Split('|', StringSplitOptions.RemoveEmptyEntries)
+                                     .Select(cell => cell.Trim())
+                                     .ToArray();
+                
+                if (isFirstTableRow)
+                {
+                    result.Append("<thead><tr>");
+                    foreach (var cell in cells)
+                    {
+                        result.Append($"<th>{System.Web.HttpUtility.HtmlEncode(cell)}</th>");
+                    }
+                    result.Append("</tr></thead><tbody>");
+                    isFirstTableRow = false;
+                }
+                else
+                {
+                    result.Append("<tr>");
+                    foreach (var cell in cells)
+                    {
+                        result.Append($"<td>{System.Web.HttpUtility.HtmlEncode(cell)}</td>");
+                    }
+                    result.Append("</tr>");
+                }
+            }
+            else
+            {
+                // Not a table row
+                if (inTable)
+                {
+                    // End of table
+                    result.Append("</tbody></table></div>");
+                    inTable = false;
+                }
+                
+                // Add regular text (preserve existing formatting)
+                if (!string.IsNullOrWhiteSpace(trimmedLine))
+                {
+                    result.Append($"<p>{System.Web.HttpUtility.HtmlEncode(trimmedLine)}</p>");
+                }
+            }
+        }
+        
+        // Close table if we ended inside one
+        if (inTable)
+        {
+            result.Append("</tbody></table></div>");
+        }
+        
+        return result.ToString();
+    }
+    
+    private async Task TryExample(string exampleQuery)
+    {
+        if (isLoading) return;
+        
+        // Set the input field
+        chatRequest.Message = exampleQuery;
+        
+        // Execute the query
+        await SendMessage();
+    }
+    
+    private string FormatProcessingTime(double processingTimeMs)
+    {
+        if (processingTimeMs < 1000)
+        {
+            return $"{processingTimeMs:F0}ms";
+        }
+        else if (processingTimeMs < 60000)
+        {
+            return $"{processingTimeMs / 1000:F1}s";
+        }
+        else
+        {
+            var minutes = Math.Floor(processingTimeMs / 60000);
+            var seconds = (processingTimeMs % 60000) / 1000;
+            return $"{minutes}m {seconds:F1}s";
+        }
+    }
+}
+
+<style>
+    .chat-container {
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        max-width: 1200px;
+        margin: 0 auto;
+        background: #f8f9fa;
+    }
+
+    .chat-header {
+        background: white;
+        padding: 1rem 2rem;
+        border-bottom: 1px solid #dee2e6;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .chat-header h1 {
+        margin: 0;
+        color: #333;
+        font-size: 1.5rem;
+    }
+
+    .user-info {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+    }
+
+    .user-info span {
+        margin-left: 0.5rem;
+    }
+
+    .chat-messages {
+        flex: 1;
+        overflow-y: auto;
+        padding: 1rem;
+        background: #f8f9fa;
+    }
+
+    .welcome-message {
+        text-align: center;
+        padding: 2rem;
+        background: white;
+        border-radius: 8px;
+        margin: 2rem 0;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .welcome-message h3 {
+        color: #007bff;
+        margin-bottom: 1rem;
+    }
+
+    .query-restriction-notice {
+        background: #e7f3ff;
+        border: 1px solid #b3d7ff;
+        border-radius: 6px;
+        padding: 0.75rem;
+        margin-top: 1rem;
+        color: #0056b3;
+        font-size: 0.9rem;
+    }
+
+    .query-restriction-notice i {
+        margin-right: 0.5rem;
+    }
+
+    .welcome-message p {
+        color: #6c757d;
+        margin-bottom: 0.5rem;
+    }
+
+    .hot-buttons-container {
+        background: white;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-left: 4px solid #007bff;
+    }
+
+    .hot-buttons-header {
+        margin-bottom: 1rem;
+    }
+
+    .hot-buttons-header h4 {
+        margin: 0;
+        color: #007bff;
+        font-size: 1rem;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .hot-buttons-header h4::before {
+        content: "⚡";
+        font-size: 1.1rem;
+    }
+
+    .example-prompts {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        margin: 0;
+    }
+
+    .example-row {
+        display: flex;
+        gap: 0.75rem;
+        justify-content: space-between;
+    }
+
+    .example-prompt {
+        background: linear-gradient(135deg, #007bff, #0056b3);
+        color: white;
+        border: none;
+        border-radius: 12px;
+        padding: 1rem 1.5rem;
+        font-size: 0.85rem;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        text-align: left;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        box-shadow: 0 2px 8px rgba(0, 123, 255, 0.2);
+        flex: 1;
+        min-height: 60px;
+    }
+
+    .example-prompt:hover {
+        background: linear-gradient(135deg, #0056b3, #004085);
+        transform: translateY(-2px);
+        box-shadow: 0 4px 16px rgba(0, 123, 255, 0.3);
+    }
+
+    .example-prompt:active {
+        transform: translateY(0);
+        box-shadow: 0 2px 8px rgba(0, 123, 255, 0.2);
+    }
+
+    .example-prompt i {
+        font-size: 1.1rem;
+        opacity: 0.9;
+    }
+
+
+    .table-container {
+        margin: 1rem 0;
+        overflow-x: auto;
+        border-radius: 8px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    .result-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.9rem;
+        background: white;
+        min-width: 600px;
+    }
+
+    .result-table th {
+        background: linear-gradient(135deg, #007bff, #0056b3);
+        color: white;
+        font-weight: 600;
+        padding: 12px 16px;
+        text-align: left;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        border-bottom: 2px solid #0056b3;
+    }
+
+    .result-table td {
+        padding: 12px 16px;
+        border-bottom: 1px solid #e9ecef;
+        color: #495057;
+    }
+
+    .result-table tr:nth-child(even) {
+        background-color: #f8f9fa;
+    }
+
+    .result-table tr:hover {
+        background-color: #e3f2fd;
+        transition: background-color 0.2s ease;
+    }
+
+    .result-table th:first-child,
+    .result-table td:first-child {
+        border-left: none;
+    }
+
+    .result-table th:last-child,
+    .result-table td:last-child {
+        border-right: none;
+    }
+
+    .message {
+        margin-bottom: 1rem;
+        display: flex;
+    }
+
+    .user-message {
+        justify-content: flex-end;
+    }
+
+    .user-message .message-content {
+        background: #007bff;
+        color: white;
+        max-width: 70%;
+        padding: 1rem;
+        border-radius: 18px 18px 4px 18px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+
+    .assistant-message .message-content {
+        background: white;
+        color: #333;
+        max-width: 80%;
+        padding: 1rem;
+        border-radius: 18px 18px 18px 4px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-left: 4px solid #28a745;
+    }
+
+    .message-text {
+        line-height: 1.5;
+        word-wrap: break-word;
+    }
+
+    .message-time {
+        font-size: 0.8rem;
+        color: #6c757d;
+        margin-top: 0.5rem;
+        text-align: right;
+    }
+
+    .sql-query {
+        background: #f8f9fa;
+        padding: 0.75rem;
+        border-radius: 4px;
+        margin-bottom: 0.75rem;
+        border-left: 3px solid #007bff;
+    }
+
+    .sql-query strong {
+        display: block;
+        margin-bottom: 0.5rem;
+        color: #007bff;
+    }
+
+    .sql-query code {
+        background: #e9ecef;
+        padding: 0.25rem 0.5rem;
+        border-radius: 3px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.9rem;
+        display: block;
+        word-break: break-all;
+    }
+
+    .chat-input-container {
+        background: white;
+        padding: 1rem 2rem;
+        border-top: 1px solid #dee2e6;
+        box-shadow: 0 -2px 4px rgba(0,0,0,0.1);
+    }
+
+    .chat-input-form {
+        width: 100%;
+    }
+
+    .input-group {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .form-control {
+        flex: 1;
+        padding: 0.75rem;
+        border: 1px solid #ddd;
+        border-radius: 25px;
+        font-size: 1rem;
+        outline: none;
+    }
+
+    .form-control:focus {
+        border-color: #007bff;
+        box-shadow: 0 0 0 2px rgba(0, 123, 255, 0.25);
+    }
+
+    .btn {
+        padding: 0.75rem 1.5rem;
+        border: none;
+        border-radius: 25px;
+        font-size: 1rem;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .btn-send {
+        background: #007bff;
+        color: white;
+    }
+
+    .btn-send:hover:not(:disabled) {
+        background: #0056b3;
+        transform: translateY(-1px);
+    }
+
+    .btn-send:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+    }
+
+    .btn-logout {
+        background: #dc3545;
+        color: white;
+        padding: 0.5rem 1rem;
+        font-size: 0.9rem;
+    }
+
+    .btn-logout:hover {
+        background: #c82333;
+    }
+
+    .btn-login {
+        background: #28a745;
+        color: white;
+        padding: 0.5rem 1rem;
+        font-size: 0.9rem;
+    }
+
+    .btn-login:hover {
+        background: #218838;
+    }
+
+    .btn-admin {
+        background: #6f42c1;
+        color: white;
+        padding: 0.5rem 1rem;
+        font-size: 0.9rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .btn-admin:hover {
+        background: #5a2a9d;
+        transform: translateY(-1px);
+    }
+
+    .btn-home {
+        background: #17a2b8;
+        color: white;
+        padding: 0.5rem 1rem;
+        font-size: 0.9rem;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+
+    .btn-home:hover {
+        background: #138496;
+        transform: translateY(-1px);
+    }
+
+    .typing-indicator {
+        display: flex;
+        gap: 3px;
+        margin-bottom: 0.5rem;
+    }
+
+    .typing-indicator span {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #007bff;
+        animation: typing 1.4s infinite ease-in-out;
+    }
+
+    .typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
+    .typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+
+    @@keyframes typing {
+        0%, 80%, 100% { transform: scale(0); }
+        40% { transform: scale(1); }
+    }
+
+    @@media (max-width: 768px) {
+        .chat-header {
+            padding: 1rem;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .chat-header h1 {
+            font-size: 1.2rem;
+        }
+
+        .chat-messages {
+            padding: 0.5rem;
+        }
+
+        .user-message .message-content,
+        .assistant-message .message-content {
+            max-width: 90%;
+        }
+
+        .chat-input-container {
+            padding: 1rem;
+        }
+
+        .example-row {
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .example-prompt {
+            font-size: 0.9rem;
+            min-height: 50px;
+        }
+    }
+</style>
